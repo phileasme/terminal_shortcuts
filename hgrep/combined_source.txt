@@ -1,0 +1,277 @@
+
+==================================================
+install.sh
+==================================================
+
+#!/usr/bin/env bash
+
+# hgrep installer script
+# This script will install hgrep by adding the function to your shell configuration
+
+# Color definitions
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+
+echo -e "${BLUE}Starting hgrep installation...${NC}"
+
+# Determine which shell configuration file to use
+SHELL_NAME=$(basename "$SHELL")
+if [ "$SHELL_NAME" = "zsh" ]; then
+    CONFIG_FILE="$HOME/.zshrc"
+elif [ "$SHELL_NAME" = "bash" ]; then
+    CONFIG_FILE="$HOME/.bashrc"
+    # For macOS, check if we need to use .bash_profile instead
+    if [[ "$OSTYPE" == "darwin"* ]] && [ -f "$HOME/.bash_profile" ]; then
+        CONFIG_FILE="$HOME/.bash_profile"
+    fi
+else
+    CONFIG_FILE="$HOME/.profile"
+fi
+
+# Check if hgrep function is already defined in the config file
+if grep -q "function hgrep" "$CONFIG_FILE" || grep -q "hgrep()" "$CONFIG_FILE"; then
+    echo -e "${YELLOW}hgrep function already exists in $CONFIG_FILE.${NC}"
+    read -p "Do you want to replace it? (y/n): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo -e "${RED}Installation cancelled.${NC}"
+        exit 1
+    fi
+    # Remove existing function
+    TEMP_FILE=$(mktemp)
+    sed '/# hgrep function definition/,/^}$/d' "$CONFIG_FILE" > "$TEMP_FILE"
+    cp "$TEMP_FILE" "$CONFIG_FILE"
+    rm "$TEMP_FILE"
+    echo -e "${YELLOW}Removed existing hgrep function.${NC}"
+fi
+
+# Read the hgrep function definition
+HGREP_SOURCE="$SCRIPT_DIR/hgrep-function.sh"
+
+if [ ! -f "$HGREP_SOURCE" ]; then
+    echo -e "${RED}Error: Could not find hgrep-function.sh in $SCRIPT_DIR${NC}"
+    exit 1
+fi
+
+# Add function definition to the config file
+echo -e "\n# Added by hgrep installer" >> "$CONFIG_FILE"
+echo -e "# hgrep function to search command history, count occurrences, and copy most frequent command" >> "$CONFIG_FILE"
+cat "$HGREP_SOURCE" >> "$CONFIG_FILE"
+
+echo -e "${GREEN}hgrep function has been added to $CONFIG_FILE${NC}"
+
+# Check if clipboard utilities are available
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS should have pbcopy pre-installed
+    if ! command -v pbcopy >/dev/null 2>&1; then
+        echo -e "${YELLOW}Warning: pbcopy not found. Clipboard functionality may not work.${NC}"
+    fi
+else
+    # Linux systems
+    if ! command -v xclip >/dev/null 2>&1 && ! command -v wl-copy >/dev/null 2>&1; then
+        echo -e "${YELLOW}Warning: No clipboard utility found. For clipboard support install xclip:${NC}"
+        echo -e "${YELLOW}  sudo apt-get install xclip    # For Debian/Ubuntu${NC}"
+        echo -e "${YELLOW}  sudo yum install xclip        # For CentOS/RHEL${NC}"
+        echo -e "${YELLOW}  sudo dnf install xclip        # For Fedora${NC}"
+        echo -e "${YELLOW}Or for Wayland:${NC}"
+        echo -e "${YELLOW}  sudo apt-get install wl-clipboard    # For Debian/Ubuntu${NC}"
+    fi
+fi
+
+echo -e "${GREEN}Installation complete!${NC}"
+echo -e "${BLUE}To start using hgrep, restart your terminal or run:${NC}"
+echo -e "${YELLOW}source $CONFIG_FILE${NC}"
+echo -e "${BLUE}Then try: ${YELLOW}hgrep git${NC}"
+
+==================================================
+hgrep-function.sh
+==================================================
+
+#!/usr/bin/env bash
+
+# hgrep function definition
+hgrep() {
+    # Show usage if no search term provided
+    if [ -z "$1" ]; then
+        echo "Usage: hgrep <search_term> [number_of_results]"
+        return 1
+    fi
+    
+    # Set default number of results to show
+    local top_n=${2:-10}
+    
+    # Get history and filter by search term
+    # Using grep with case-insensitive search for better results
+    local history_output
+    history_output=$(history | grep -i -E "$1")
+    
+    # Check if we found any matches
+    if [ -z "$history_output" ]; then
+        echo "No matching commands found in history."
+        return 0
+    fi
+    
+    # Create a temporary file for processing
+    local temp_file
+    temp_file=$(mktemp)
+    
+    # Process each line of history output
+    echo "$history_output" | while IFS= read -r line; do
+        # Skip history and hgrep commands to avoid recursion
+        if [[ "$line" == *"history |"* || "$line" == *"hgrep"* ]]; then
+            continue
+        fi
+        
+        # More aggressive cleaning of line numbers
+        # This matches and removes patterns like '6523' at the start of lines
+        cleaned_cmd=$(echo "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')
+        
+        # Also remove 'sudo' from the start if present
+        cleaned_cmd=$(echo "$cleaned_cmd" | sed 's/^sudo //')
+        
+        # Skip empty lines
+        if [ -n "$cleaned_cmd" ]; then
+            echo "$cleaned_cmd" >> "$temp_file"
+        fi
+    done
+    
+    # Count occurrences of each command
+    local commands_with_counts
+    commands_with_counts=$(sort "$temp_file" | uniq -c | sort -n)
+    
+    # Check if we have any valid commands after filtering
+    if [ -z "$commands_with_counts" ]; then
+        echo "No valid commands found after filtering."
+        rm "$temp_file"
+        return 0
+    fi
+    
+    # Display header
+    echo "$(tput sgr0) Counts $(tput setaf 3) Commands"
+    
+    # Process and display the top commands
+    echo "$commands_with_counts" | tail -n "$top_n" | while read -r count cmd; do
+        if [ -n "$cmd" ]; then
+            # Check if this is the last line to display (most frequent command)
+            if [ "$cmd" = "$(echo "$commands_with_counts" | tail -n 1 | awk '{$1=""; print $0}' | sed 's/^ //')" ]; then
+                echo "$(tput sgr0) $count $(tput setaf 2) $cmd $(tput sgr0) (Copied to clipboard!)"
+                
+                # Try different clipboard commands based on the OS
+                if [[ "$OSTYPE" == "darwin"* ]]; then
+                    # macOS
+                    echo "$cmd" | tr -d '\n' | pbcopy
+                elif command -v xclip >/dev/null 2>&1; then
+                    # Linux with xclip
+                    echo "$cmd" | tr -d '\n' | xclip -selection clipboard
+                elif command -v wl-copy >/dev/null 2>&1; then
+                    # Wayland
+                    echo "$cmd" | tr -d '\n' | wl-copy
+                else
+                    # No clipboard utility available
+                    echo "Note: No clipboard utility available. Most frequent command not copied."
+                fi
+            else
+                echo "$(tput sgr0) $count $(tput setaf 3) $cmd"
+            fi
+        fi
+    done
+    
+    # Clean up
+    rm "$temp_file"
+}
+
+==================================================
+hgrep.sh
+==================================================
+
+#!/usr/bin/env bash
+
+# hgrep: Search command history, count occurrences, and copy most frequent command
+# Usage: hgrep <search_term> [number_of_results]
+
+# Get history and filter by search term
+if [ -z "$1" ]; then
+    echo "Usage: hgrep <search_term> [number_of_results]"
+    exit 1
+fi
+
+# Set default number of results to show
+top_n=${2:-10}
+
+# Use fc command instead of history (works in scripts)
+# fc -l lists history entries, use a large number to get plenty of entries
+history_output=$(fc -l -1000 | grep -i -E "$1" | sed 's/\t/    /g')
+
+# Check if we found any matches
+if [ -z "$history_output" ]; then
+    echo "No matching commands found in history."
+    exit 0
+fi
+
+# Create a temporary file for processing
+temp_file=$(mktemp)
+
+echo "$history_output" | while IFS= read -r line; do
+    # Skip history and hgrep commands
+    if [[ "$line" == *"history |"* || "$line" == *"hgrep"* ]]; then
+        continue
+    fi
+    
+    # Remove line numbers and clean up
+    # More robust regex to handle the fc output format (which might be different)
+    cleaned_cmd=$(echo "$line" | sed -E 's/^\s*[0-9]+\s+//' | sed -E 's/^[0-9]{2}:[0-9]{2}\s+//' | sed 's/^sudo //')
+    
+    # Skip empty lines
+    if [ -n "$cleaned_cmd" ]; then
+        echo "$cleaned_cmd" >> "$temp_file"
+    fi
+done
+
+# Count occurrences of each command
+commands_with_counts=$(sort "$temp_file" | uniq -c | sort -n)
+
+# Check if we have any valid commands after filtering
+if [ -z "$commands_with_counts" ]; then
+    echo "No valid commands found after filtering."
+    rm "$temp_file"
+    exit 0
+fi
+
+# Display header
+echo "$(tput sgr0) Counts $(tput setaf 3) Commands"
+
+# Process and display the top commands
+echo "$commands_with_counts" | tail -n "$top_n" | while read -r count cmd; do
+    if [ -n "$cmd" ]; then
+        # Check if this is the last line to display (most frequent command)
+        if [ "$cmd" = "$(echo "$commands_with_counts" | tail -n 1 | awk '{$1=""; print $0}' | sed 's/^ //')" ]; then
+            echo "$(tput sgr0) $count $(tput setaf 2) $cmd $(tput sgr0) (Copied to clipboard!)"
+            
+            # Try different clipboard commands based on the OS
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                # macOS
+                echo "$cmd" | tr -d '\n' | pbcopy
+            elif command -v xclip >/dev/null 2>&1; then
+                # Linux with xclip
+                echo "$cmd" | tr -d '\n' | xclip -selection clipboard
+            elif command -v wl-copy >/dev/null 2>&1; then
+                # Wayland
+                echo "$cmd" | tr -d '\n' | wl-copy
+            else
+                # No clipboard utility available
+                echo "Note: No clipboard utility available. Most frequent command not copied."
+            fi
+        else
+            echo "$(tput sgr0) $count $(tput setaf 3) $cmd"
+        fi
+    fi
+done
+
+# Clean up
+rm "$temp_file"
